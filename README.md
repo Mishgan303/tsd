@@ -100,6 +100,4 @@ docker compose --profile lab3 down
 
 - [Отчёт по лабораторной работе №2](lab_2/README.md)
 - [Отчёт по лабораторной работе №3](lab_3/README.md)
-- [Настройка OpenMetadata](lab_3/openmetadata/README.md)
-- [Экспорт дашборда Superset](lab_3/superset/assets/README.md)
 
