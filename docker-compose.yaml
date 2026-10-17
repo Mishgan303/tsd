@@ -1,0 +1,557 @@
+x-airflow-common:
+  &airflow-common
+  image: ${AIRFLOW_IMAGE_NAME:-tsd-airflow:3.3.1}
+  build:
+    context: ./lab_3/airflow
+    args:
+      AIRFLOW_BASE_IMAGE: ${AIRFLOW_BASE_IMAGE:-apache/airflow:3.3.1}
+  env_file:
+    - ${ENV_FILE_PATH:-.env}
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_METADATA_PASSWORD:?set AIRFLOW_METADATA_PASSWORD in .env}@postgres/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql+psycopg2://airflow:${AIRFLOW_METADATA_PASSWORD:?set AIRFLOW_METADATA_PASSWORD in .env}@postgres/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?set AIRFLOW_FERNET_KEY in .env}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'true'
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_API_JWT_SECRET:?set AIRFLOW_API_JWT_SECRET in .env}
+    AIRFLOW__API_AUTH__JWT_ISSUER: ${AIRFLOW__API_AUTH__JWT_ISSUER:-airflow}
+    PYTHONPATH: /opt/airflow/dags/lab_2:/opt/airflow/dags/lab_3
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
+    AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
+    AIRFLOW_CONN_POSTGRES_ODS: postgresql://${ODS_USER:?set ODS_USER in .env}:${ODS_PASSWORD:?set ODS_PASSWORD in .env}@postgres-ods:5432/${ODS_DATABASE:?set ODS_DATABASE in .env}
+    AIRFLOW_CONN_MONGO_HN: mongo://${MONGO_ROOT_USER:?set MONGO_ROOT_USER in .env}:${MONGO_ROOT_PASSWORD:?set MONGO_ROOT_PASSWORD in .env}@mongo:27017/?authSource=admin
+    AIRFLOW_CONN_MINIO_S3: >-
+      {"conn_type":"aws","login":"${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}","password":"${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}","extra":{"endpoint_url":"http://minio:9000"}}
+    HF_HOME: /opt/airflow/huggingface-cache
+  volumes:
+    - ./lab_1/dags:/opt/airflow/dags/lab_1
+    - ./lab_2/dags:/opt/airflow/dags/lab_2
+    - ./lab_3/dags:/opt/airflow/dags/lab_3
+    - ./lab_3/sql:/opt/airflow/sql/lab_3:ro
+    - ./lab_2/sql:/opt/airflow/sql/lab_2:ro
+    - ./logs:/opt/airflow/logs
+    - ./config:/opt/airflow/config
+    - ./plugins:/opt/airflow/plugins
+    - huggingface-cache:/opt/airflow/huggingface-cache
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    &airflow-common-depends-on
+    redis:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+
+x-openmetadata-common-env:
+  &openmetadata-common-env
+  OPENMETADATA_CLUSTER_NAME: openmetadata
+  SERVER_PORT: 8585
+  SERVER_ADMIN_PORT: 8586
+  LOG_LEVEL: INFO
+  AUTHORIZER_CLASS_NAME: org.openmetadata.service.security.DefaultAuthorizer
+  AUTHORIZER_REQUEST_FILTER: org.openmetadata.service.security.JwtFilter
+  AUTHORIZER_ADMIN_PRINCIPALS: "[admin]"
+  AUTHORIZER_ALLOWED_REGISTRATION_DOMAIN: '["all"]'
+  AUTHORIZER_INGESTION_PRINCIPALS: "[ingestion-bot]"
+  AUTHORIZER_PRINCIPAL_DOMAIN: open-metadata.org
+  AUTHENTICATION_PROVIDER: basic
+  AUTHENTICATION_PUBLIC_KEYS: "[http://openmetadata-server:8585/api/v1/system/config/jwks]"
+  AUTHENTICATION_ENABLE_SELF_SIGNUP: "true"
+  PIPELINE_SERVICE_CLIENT_ENDPOINT: http://openmetadata-ingestion:8080
+  SERVER_HOST_API_URL: http://openmetadata-server:8585/api
+  PIPELINE_SERVICE_CLIENT_VERIFY_SSL: no-ssl
+  DB_DRIVER_CLASS: org.postgresql.Driver
+  DB_SCHEME: postgresql
+  DB_PARAMS: allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC
+  DB_USER: openmetadata_user
+  DB_USER_PASSWORD: openmetadata_password
+  DB_HOST: openmetadata-db
+  DB_PORT: 5432
+  OM_DATABASE: openmetadata_db
+  ELASTICSEARCH_HOST: openmetadata-search
+  ELASTICSEARCH_PORT: 9200
+  ELASTICSEARCH_SCHEME: http
+  SEARCH_TYPE: elasticsearch
+  OPENMETADATA_HEAP_OPTS: ${OPENMETADATA_HEAP_OPTS:--Xmx1G -Xms1G}
+
+services:
+
+  mongo:
+    image: mongo
+    restart: always
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:?set MONGO_ROOT_USER in .env}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?set MONGO_ROOT_PASSWORD in .env}
+      GLIBC_TUNABLES: glibc.pthread.rseq=1
+    volumes:
+      - mongo-data:/data/db
+
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  postgres-ods:
+    image: postgres:16
+    restart: always
+    # set shared memory limit when using docker compose
+    shm_size: 128mb
+    # or set shared memory limit when deploy via swarm stack
+    volumes:
+      - postgres-ods-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: ${ODS_USER:?set ODS_USER in .env}
+      POSTGRES_PASSWORD: ${ODS_PASSWORD:?set ODS_PASSWORD in .env}
+      POSTGRES_DB: ${ODS_DATABASE:?set ODS_DATABASE in .env}
+
+  adminer:
+    image: adminer
+    restart: always
+    ports:
+      - 8082:8080
+
+
+  minio:
+    image: quay.io/minio/minio
+    restart: always
+    container_name: minio-staging
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+   
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: ${AIRFLOW_METADATA_PASSWORD:?set AIRFLOW_METADATA_PASSWORD in .env}
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  redis:
+    image: redis:7.2-bookworm
+    expose:
+      - 6379
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 30s
+      retries: 50
+      start_period: 30s
+    restart: always
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-worker:
+    <<: *airflow-common
+    command: celery worker
+    healthcheck:
+      # yamllint disable rule:line-length
+      test: ["CMD-SHELL", 'celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}" || celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    environment:
+      <<: *airflow-common-env
+      # Required to handle warm shutdown of the celery workers properly
+      # See https://airflow.apache.org/docs/docker-stack/entrypoint.html#signal-propagation
+      DUMB_INIT_SETSID: "0"
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-apiserver:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    # yamllint disable rule:line-length
+    command:
+      - -c
+      - |
+        if [[ -z "${AIRFLOW_UID}" ]]; then
+          echo
+          echo -e "\033[1;33mWARNING!!!: AIRFLOW_UID not set!\e[0m"
+          echo "If you are on Linux, you SHOULD follow the instructions below to set "
+          echo "AIRFLOW_UID environment variable, otherwise files will be owned by root."
+          echo "For other operating systems you can get rid of the warning with manually created .env file:"
+          echo "    See: https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html#setting-the-right-airflow-user"
+          echo
+          export AIRFLOW_UID=$$(id -u)
+        fi
+        one_meg=1048576
+        mem_available=$$(($$(getconf _PHYS_PAGES) * $$(getconf PAGE_SIZE) / one_meg))
+        cpus_available=$$(grep -cE 'cpu[0-9]+' /proc/stat)
+        disk_available=$$(df / | tail -1 | awk '{print $$4}')
+        warning_resources="false"
+        if (( mem_available < 4000 )) ; then
+          echo
+          echo -e "\033[1;33mWARNING!!!: Not enough memory available for Docker.\e[0m"
+          echo "At least 4GB of memory required. You have $$(numfmt --to iec $$((mem_available * one_meg)))"
+          echo
+          warning_resources="true"
+        fi
+        if (( cpus_available < 2 )); then
+          echo
+          echo -e "\033[1;33mWARNING!!!: Not enough CPUS available for Docker.\e[0m"
+          echo "At least 2 CPUs recommended. You have $${cpus_available}"
+          echo
+          warning_resources="true"
+        fi
+        if (( disk_available < one_meg * 10 )); then
+          echo
+          echo -e "\033[1;33mWARNING!!!: Not enough Disk space available for Docker.\e[0m"
+          echo "At least 10 GBs recommended. You have $$(numfmt --to iec $$((disk_available * 1024 )))"
+          echo
+          warning_resources="true"
+        fi
+        if [[ $${warning_resources} == "true" ]]; then
+          echo
+          echo -e "\033[1;33mWARNING!!!: You have not enough resources to run Airflow (see above)!\e[0m"
+          echo "Please follow the instructions to increase amount of resources available:"
+          echo "   https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html#before-you-begin"
+          echo
+        fi
+        echo
+        echo "Creating missing opt dirs if missing:"
+        echo
+        mkdir -v -p /opt/airflow/{logs,dags,plugins,config,huggingface-cache}
+        echo
+        echo "Airflow version:"
+        /entrypoint airflow version
+        echo
+        echo "Files in shared volumes:"
+        echo
+        ls -la /opt/airflow/{logs,dags,plugins,config}
+        echo
+        echo "Running airflow config list to create default config file if missing."
+        echo
+        /entrypoint airflow config list >/dev/null
+        echo
+        echo "Files in shared volumes:"
+        echo
+        ls -la /opt/airflow/{logs,dags,plugins,config}
+        echo
+        echo "Change ownership of files in /opt/airflow to ${AIRFLOW_UID:-50000}:0"
+        echo
+        chown -R "${AIRFLOW_UID:-50000}:0" /opt/airflow/
+        echo
+        echo "Change ownership of files in shared volumes to ${AIRFLOW_UID:-50000}:0"
+        echo
+        chown -v -R "${AIRFLOW_UID:-50000}:0" /opt/airflow/{logs,dags,plugins,config}
+        echo
+        echo "Files in shared volumes:"
+        echo
+        ls -la /opt/airflow/{logs,dags,plugins,config}
+
+    # yamllint enable rule:line-length
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USERNAME:?set AIRFLOW_ADMIN_USERNAME in .env}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:?set AIRFLOW_ADMIN_PASSWORD in .env}
+      _PIP_ADDITIONAL_REQUIREMENTS: ''
+    user: "0:0"
+
+  airflow-cli:
+    <<: *airflow-common
+    profiles:
+      - debug
+    environment:
+      <<: *airflow-common-env
+      CONNECTION_CHECK_MAX_COUNT: "0"
+    # Workaround for entrypoint issue. See: https://github.com/apache/airflow/issues/16252
+    command:
+      - bash
+      - -c
+      - airflow
+    depends_on:
+      <<: *airflow-common-depends-on
+  flower:
+    <<: *airflow-common
+    command: celery flower
+    profiles:
+      - flower
+    ports:
+      - "5555:5555"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:5555/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  superset-db:
+    image: postgres:16
+    profiles: ["superset", "lab3"]
+    restart: always
+    environment:
+      POSTGRES_USER: ${SUPERSET_DB_USER:?set SUPERSET_DB_USER in .env}
+      POSTGRES_PASSWORD: ${SUPERSET_DB_PASSWORD:?set SUPERSET_DB_PASSWORD in .env}
+      POSTGRES_DB: ${SUPERSET_DB_NAME:?set SUPERSET_DB_NAME in .env}
+    volumes:
+      - superset-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  superset-init:
+    image: tsd-superset:6.0.0
+    build:
+      context: ./lab_3/superset
+      args:
+        SUPERSET_BASE_IMAGE: ${SUPERSET_IMAGE:-apache/superset:6.0.0}
+    profiles: ["superset", "lab3"]
+    env_file:
+      - ${ENV_FILE_PATH:-.env}
+    environment:
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+      SUPERSET_DATABASE_URI: postgresql+psycopg2://${SUPERSET_DB_USER:?set SUPERSET_DB_USER in .env}:${SUPERSET_DB_PASSWORD:?set SUPERSET_DB_PASSWORD in .env}@superset-db:5432/${SUPERSET_DB_NAME:?set SUPERSET_DB_NAME in .env}
+    volumes:
+      - ./lab_3/superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+      - ./lab_3/superset/init.sh:/app/docker/init-lab3.sh:ro
+      - superset-home:/app/superset_home
+    entrypoint: ["/bin/bash", "/app/docker/init-lab3.sh"]
+    depends_on:
+      superset-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  superset:
+    image: tsd-superset:6.0.0
+    build:
+      context: ./lab_3/superset
+      args:
+        SUPERSET_BASE_IMAGE: ${SUPERSET_IMAGE:-apache/superset:6.0.0}
+    profiles: ["superset", "lab3"]
+    restart: always
+    env_file:
+      - ${ENV_FILE_PATH:-.env}
+    environment:
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+      SUPERSET_DATABASE_URI: postgresql+psycopg2://${SUPERSET_DB_USER:?set SUPERSET_DB_USER in .env}:${SUPERSET_DB_PASSWORD:?set SUPERSET_DB_PASSWORD in .env}@superset-db:5432/${SUPERSET_DB_NAME:?set SUPERSET_DB_NAME in .env}
+    volumes:
+      - ./lab_3/superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+      - superset-home:/app/superset_home
+    command: ["/usr/bin/run-server.sh"]
+    ports:
+      - "8088:8088"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8088/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    depends_on:
+      superset-init:
+        condition: service_completed_successfully
+
+  openmetadata-db:
+    image: ${OPENMETADATA_POSTGRES_IMAGE:-docker.getcollate.io/openmetadata/postgresql:1.12.6}
+    profiles: ["openmetadata", "lab3"]
+    restart: always
+    command: "--work_mem=10MB"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${OPENMETADATA_DB_ROOT_PASSWORD:?set OPENMETADATA_DB_ROOT_PASSWORD in .env}
+    expose:
+      - "5432"
+    volumes:
+      - openmetadata-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "psql -U postgres -tAc 'select 1' -d openmetadata_db"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  openmetadata-search:
+    image: ${OPENMETADATA_ELASTICSEARCH_IMAGE:-docker.elastic.co/elasticsearch/elasticsearch:9.3.0}
+    profiles: ["openmetadata", "lab3"]
+    restart: always
+    environment:
+      discovery.type: single-node
+      ES_JAVA_OPTS: ${OPENMETADATA_SEARCH_JAVA_OPTS:--Xms1G -Xmx1G}
+      xpack.security.enabled: "false"
+    expose:
+      - "9200"
+    volumes:
+      - openmetadata-search-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(green|yellow)\"'"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  openmetadata-migrate:
+    image: ${OPENMETADATA_SERVER_IMAGE:-docker.getcollate.io/openmetadata/server:1.12.6}
+    profiles: ["openmetadata", "lab3"]
+    command: ["./bootstrap/openmetadata-ops.sh", "migrate"]
+    environment:
+      <<: *openmetadata-common-env
+    depends_on:
+      openmetadata-db:
+        condition: service_healthy
+      openmetadata-search:
+        condition: service_healthy
+
+  openmetadata-server:
+    image: ${OPENMETADATA_SERVER_IMAGE:-docker.getcollate.io/openmetadata/server:1.12.6}
+    profiles: ["openmetadata", "lab3"]
+    restart: always
+    environment:
+      <<: *openmetadata-common-env
+    expose:
+      - "8586"
+    ports:
+      - "8585:8585"
+    depends_on:
+      openmetadata-db:
+        condition: service_healthy
+      openmetadata-search:
+        condition: service_healthy
+      openmetadata-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8586/healthcheck"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  openmetadata-ingestion:
+    image: ${OPENMETADATA_INGESTION_IMAGE:-docker.getcollate.io/openmetadata/ingestion:1.12.6}
+    profiles: ["openmetadata", "lab3"]
+    restart: always
+    environment:
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__OPENMETADATA_AIRFLOW_APIS__DAG_GENERATED_CONFIGS: /opt/airflow/dag_generated_configs
+      DB_HOST: openmetadata-db
+      DB_PORT: 5432
+      AIRFLOW_DB: airflow_db
+      DB_USER: airflow_user
+      DB_SCHEME: postgresql+psycopg2
+      DB_PASSWORD: airflow_pass
+    entrypoint: /bin/bash
+    command: ["/opt/airflow/ingestion_dependency.sh"]
+    ports:
+      - "8083:8080"
+    volumes:
+      - openmetadata-ingestion-configs:/opt/airflow/dag_generated_configs
+      - openmetadata-ingestion-dags:/opt/airflow/dags
+    depends_on:
+      openmetadata-db:
+        condition: service_healthy
+      openmetadata-search:
+        condition: service_healthy
+      openmetadata-server:
+        condition: service_healthy
+
+volumes:
+  postgres-db-volume:
+  postgres-ods-data:
+  mongo-data:
+  minio-data:
+  superset-db-data:
+  superset-home:
+  openmetadata-db-data:
+  openmetadata-search-data:
+  openmetadata-ingestion-configs:
+  openmetadata-ingestion-dags:
+  huggingface-cache:

@@ -669,11 +669,6 @@ def benchmark_minio():
 
     storage_size = info["ContentLength"]
 
-    # У MinIO вообще нет схемы БД.
-    # Любое поле можно добавить в JSON,
-    # но для изменения существующего файла
-    # объект приходится перезаписывать.
-
     schema_flexibility = (
         "No database schema, but changing records requires rewriting the object"
     )
@@ -714,7 +709,6 @@ def benchmark_db():
     def check_dataset():
         """
         Проверяем dataset до benchmark.
-        Большие данные через XCom не передаём.
         """
 
         records = load_records()
@@ -777,12 +771,6 @@ def benchmark_db():
 
             print()
             print("=" * 80)
-
-    # Последовательный benchmark:
-    #
-    # PostgreSQL → MongoDB → MinIO
-    #
-    # Они не конкурируют друг с другом за ресурсы.
 
     dataset = check_dataset()
 
